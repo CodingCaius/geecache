@@ -3,9 +3,9 @@
 package geecache
 
 import (
+	pb "github.com/CodingCaius/geecache/geecachepb"
+	"github.com/CodingCaius/geecache/singleflight"
 	"fmt"
-	"cache/geecache/singleflight"
-	pb "cache/geecache/geecachepb"
 	"log"
 	"sync"
 )

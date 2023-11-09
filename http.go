@@ -7,15 +7,16 @@
 package geecache
 
 import (
-	"cache/geecache/consistenthash"
-	pb "cache/geecache/geecachepb"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+
+	"github.com/CodingCaius/geecache/consistenthash"
+	pb "github.com/CodingCaius/geecache/geecachepb"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -160,7 +161,7 @@ func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 	}
 
 	// 将响应体读取到一个字节切片中。如果在这个过程中出现错误，就返回一个错误
-	bytes, err := ioutil.ReadAll(res.Body)
+	bytes, err := io.ReadAll(res.Body)
 	if err != nil {
 		return fmt.Errorf("reading response body: %v", err)
 	}

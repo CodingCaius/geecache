@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"cache/geecache"
 
 	"log"
 	"net/http"
+	"github.com/CodingCaius/geecache"
 )
 
 var db = map[string]string{

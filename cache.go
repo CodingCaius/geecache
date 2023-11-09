@@ -3,7 +3,7 @@
 package geecache
 
 import (
-	"cache/geecache/lru"
+	"github.com/CodingCaius/geecache/lru"
 	"sync"
 )
 

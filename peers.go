@@ -1,6 +1,6 @@
 package geecache
 
-import pb "cache/geecache/geecachepb"
+import pb "github.com/CodingCaius/geecache/geecachepb"
 
 // 在这里，抽象出 2 个接口，
 // PeerPicker 的 PickPeer() 方法用于根据传入的 key 选择相应节点 PeerGetter。

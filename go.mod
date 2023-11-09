@@ -1,4 +1,4 @@
-module cache
+module github.com/CodingCaius/geecache
 
 go 1.20
 
