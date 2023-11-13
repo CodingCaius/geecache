@@ -39,7 +39,7 @@ var (
 // server 结构体定义了 geecache 的 gRPC 服务
 type server struct {
 	// 这玩意儿必须写
-	pb.UnimplementedGroupCacheServer // 未实现的 gRPC 服务接口，用于扩展 gRPC 方法
+	pb.UnimplementedGeeCacheServer // 未实现的 gRPC 服务接口，用于扩展 gRPC 方法
 
 	addr string // 服务器的地址，格式为 ip:port
 	status bool // 服务器的运行状态，true 表示正在运行，false 表示停止
@@ -109,7 +109,7 @@ func (s *server) Start() error {
 	}
 	// 创建一个新的 gRPC 服务器并将缓存服务注册到该服务器上
 	grpcServer := grpc.NewServer()
-	pb.RegisterGroupCacheServer(grpcServer, s)
+	pb.RegisterGeeCacheServer(grpcServer, s)
 
 	// 注册服务至 etcd
 	go func() {

@@ -19,89 +19,89 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	GroupCache_Get_FullMethodName = "/geecachepb.GroupCache/Get"
+	GeeCache_Get_FullMethodName = "/geecachepb.GeeCache/Get"
 )
 
-// GroupCacheClient is the client API for GroupCache service.
+// GeeCacheClient is the client API for GeeCache service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-type GroupCacheClient interface {
+type GeeCacheClient interface {
 	Get(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error)
 }
 
-type groupCacheClient struct {
+type geeCacheClient struct {
 	cc grpc.ClientConnInterface
 }
 
-func NewGroupCacheClient(cc grpc.ClientConnInterface) GroupCacheClient {
-	return &groupCacheClient{cc}
+func NewGeeCacheClient(cc grpc.ClientConnInterface) GeeCacheClient {
+	return &geeCacheClient{cc}
 }
 
-func (c *groupCacheClient) Get(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error) {
+func (c *geeCacheClient) Get(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error) {
 	out := new(Response)
-	err := c.cc.Invoke(ctx, GroupCache_Get_FullMethodName, in, out, opts...)
+	err := c.cc.Invoke(ctx, GeeCache_Get_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// GroupCacheServer is the server API for GroupCache service.
-// All implementations must embed UnimplementedGroupCacheServer
+// GeeCacheServer is the server API for GeeCache service.
+// All implementations must embed UnimplementedGeeCacheServer
 // for forward compatibility
-type GroupCacheServer interface {
+type GeeCacheServer interface {
 	Get(context.Context, *Request) (*Response, error)
-	mustEmbedUnimplementedGroupCacheServer()
+	mustEmbedUnimplementedGeeCacheServer()
 }
 
-// UnimplementedGroupCacheServer must be embedded to have forward compatible implementations.
-type UnimplementedGroupCacheServer struct {
+// UnimplementedGeeCacheServer must be embedded to have forward compatible implementations.
+type UnimplementedGeeCacheServer struct {
 }
 
-func (UnimplementedGroupCacheServer) Get(context.Context, *Request) (*Response, error) {
+func (UnimplementedGeeCacheServer) Get(context.Context, *Request) (*Response, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
 }
-func (UnimplementedGroupCacheServer) mustEmbedUnimplementedGroupCacheServer() {}
+func (UnimplementedGeeCacheServer) mustEmbedUnimplementedGeeCacheServer() {}
 
-// UnsafeGroupCacheServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to GroupCacheServer will
+// UnsafeGeeCacheServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to GeeCacheServer will
 // result in compilation errors.
-type UnsafeGroupCacheServer interface {
-	mustEmbedUnimplementedGroupCacheServer()
+type UnsafeGeeCacheServer interface {
+	mustEmbedUnimplementedGeeCacheServer()
 }
 
-func RegisterGroupCacheServer(s grpc.ServiceRegistrar, srv GroupCacheServer) {
-	s.RegisterService(&GroupCache_ServiceDesc, srv)
+func RegisterGeeCacheServer(s grpc.ServiceRegistrar, srv GeeCacheServer) {
+	s.RegisterService(&GeeCache_ServiceDesc, srv)
 }
 
-func _GroupCache_Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _GeeCache_Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Request)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(GroupCacheServer).Get(ctx, in)
+		return srv.(GeeCacheServer).Get(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: GroupCache_Get_FullMethodName,
+		FullMethod: GeeCache_Get_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GroupCacheServer).Get(ctx, req.(*Request))
+		return srv.(GeeCacheServer).Get(ctx, req.(*Request))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-// GroupCache_ServiceDesc is the grpc.ServiceDesc for GroupCache service.
+// GeeCache_ServiceDesc is the grpc.ServiceDesc for GeeCache service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
-var GroupCache_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "geecachepb.GroupCache",
-	HandlerType: (*GroupCacheServer)(nil),
+var GeeCache_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "geecachepb.GeeCache",
+	HandlerType: (*GeeCacheServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
 			MethodName: "Get",
-			Handler:    _GroupCache_Get_Handler,
+			Handler:    _GeeCache_Get_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

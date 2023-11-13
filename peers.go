@@ -13,7 +13,11 @@ type PeerPicker interface {
 	PickPeer(key string) (peer PeerGetter, ok bool)
 }
 
-// PeerGetter 是对等方必须实现的接口。
+// PeerGetter 是每个 peer 必须实现的接口。
 type PeerGetter interface {
 	Get(in *pb.Request, out *pb.Response) error
 }
+
+// 实现 PeerGetter 接口时，可以选择使用不同的方法签名，
+// 只要确保实现了 PeerGetter 接口的 Get 方法的名字和 proto 文件中定义的一样即可。
+// 因为 gRPC 生成的代码在内部会处理输入和输出参数的映射。

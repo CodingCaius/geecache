@@ -8,7 +8,7 @@ import (
 
 // EtcdDial 向grpc请求一个服务
 // 用于在 gRPC 客户端中建立连接的函数，通过提供一个etcd client和service name即可获得Connection
-func EtcdDail(c *clientv3.Client, service string) (*grpc.ClientConn, error) {
+func EtcdDial(c *clientv3.Client, service string) (*grpc.ClientConn, error) {
 	// 创建一个 etcd 解析器
 	// 该解析器用于解析服务名称到实际地址的映射
 	etcdResolver, err := resolver.NewBuilder(c)
