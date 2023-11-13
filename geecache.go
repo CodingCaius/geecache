@@ -62,6 +62,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 // 用来特定名称的 Group，这里使用了只读锁 RLock()，因为不涉及任何冲突变量的写操作
 // GetGroup returns the named group previously created with NewGroup, or
 // nil if there's no such group.
+// GetGroup 获取对应命名空间的缓存
 func GetGroup(name string) *Group {
 	mu.RLock()
 	g := groups[name]
