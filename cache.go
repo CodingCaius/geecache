@@ -1,4 +1,4 @@
-// 并发控制
+// cache 模块负责提供对lru模块的并发控制
 
 package geecache
 
@@ -7,6 +7,8 @@ import (
 	"sync"
 )
 
+// 这样设计可以进行cache和算法的分离，比如我现在实现了lfu缓存模块
+// 只需替换cache成员即可
 type cache struct {
 	mu         sync.Mutex // 用于确保并发访问时的线程安全
 	lru        *lru.Cache // 指向 lru.Cache 类型的指针，用于存储缓存的数据

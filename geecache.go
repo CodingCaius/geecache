@@ -23,7 +23,7 @@ type Group struct {
 	peers     PeerPicker
 	// use singleflight.Group to make sure that
 	// each key is only fetched once
-	loader *singleflight.Group
+	loader *singleflight.Group // 处理重复请求
 }
 
 // Getter  加载键的数据
@@ -33,6 +33,9 @@ type Getter interface {
 
 // A GetterFunc implements Getter with a function.
 type GetterFunc func(key string) ([]byte, error)
+
+// GetterFunc 通过实现 Get 方法，使得任意匿名函数func
+// 通过被GetterFunc(func)类型强制转换后，实现了 Getter 接口的能力
 
 // Get implements Getter interface function
 func (f GetterFunc) Get(key string) ([]byte, error) {
@@ -44,7 +47,7 @@ var (
 	groups = make(map[string]*Group)
 )
 
-// NewGroup 实例化 Group，并且将 group 存储在全局变量 groups 中
+// NewGroup 实例化 Group，创建一个新的缓存空间，并且将 group 存储在全局变量 groups 中
 func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 	// 为了确保创建的缓存组具有有效的数据获取方式，不允许传入一个空的 getter
 	if getter == nil {
@@ -113,7 +116,7 @@ func (g *Group) load(key string) (value ByteView, err error) {
 	return
 }
 
-// 缓存未命中时，调用回调函数获取数据
+// 缓存未命中时，调用回调函数获取数据，并填充缓存
 func (g *Group) getLocally(key string) (ByteView, error) {
 	bytes, err := g.getter.Get(key)
 	// 如果获取数据时发生错误，会返回一个空的 ByteView 和相应的错误
@@ -129,12 +132,12 @@ func (g *Group) getLocally(key string) (ByteView, error) {
 	return value, nil
 }
 
-// 将 key 和对应的 ByteView 存储到缓存中
+// populateCache 将 key 和对应的 ByteView 存储到缓存中,提供填充缓存的能力
 func (g *Group) populateCache(key string, value ByteView) {
 	g.mainCache.add(key, value)
 }
 
-// RegisterPeers 注册远程节点选择器
+// RegisterPeers 为 Group 注册远程节点选择器(Server)
 func (g *Group) RegisterPeers(peers PeerPicker) {
 	// 如果已经注册过节点选择器，会触发 panic
 	if g.peers != nil {
@@ -155,4 +158,15 @@ func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
 		return ByteView{}, err
 	}
 	return ByteView{b: res.Value}, nil
+}
+
+// DestoryGroup 销毁指定组名的缓存组，停止相关服务器
+func DestoryGroup(name string) {
+	g := GetGroup(name)
+	if g != nil {
+		svr := g.peers.(*server)
+		svr.Stop()
+		delete(groups, name)
+		log.Printf("Destroy cache [%s %s]", name, svr.addr)
+	}
 }
