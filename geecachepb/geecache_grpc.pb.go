@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.3.0
 // - protoc             v3.21.11
-// source: geecachepb.proto
+// source: geecache.proto
 
 package geecachepb
 
@@ -26,7 +26,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type GeeCacheClient interface {
-	Get(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error)
+	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 }
 
 type geeCacheClient struct {
@@ -37,8 +37,8 @@ func NewGeeCacheClient(cc grpc.ClientConnInterface) GeeCacheClient {
 	return &geeCacheClient{cc}
 }
 
-func (c *geeCacheClient) Get(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error) {
-	out := new(Response)
+func (c *geeCacheClient) Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error) {
+	out := new(GetResponse)
 	err := c.cc.Invoke(ctx, GeeCache_Get_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
@@ -50,7 +50,7 @@ func (c *geeCacheClient) Get(ctx context.Context, in *Request, opts ...grpc.Call
 // All implementations must embed UnimplementedGeeCacheServer
 // for forward compatibility
 type GeeCacheServer interface {
-	Get(context.Context, *Request) (*Response, error)
+	Get(context.Context, *GetRequest) (*GetResponse, error)
 	mustEmbedUnimplementedGeeCacheServer()
 }
 
@@ -58,7 +58,7 @@ type GeeCacheServer interface {
 type UnimplementedGeeCacheServer struct {
 }
 
-func (UnimplementedGeeCacheServer) Get(context.Context, *Request) (*Response, error) {
+func (UnimplementedGeeCacheServer) Get(context.Context, *GetRequest) (*GetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Get not implemented")
 }
 func (UnimplementedGeeCacheServer) mustEmbedUnimplementedGeeCacheServer() {}
@@ -75,7 +75,7 @@ func RegisterGeeCacheServer(s grpc.ServiceRegistrar, srv GeeCacheServer) {
 }
 
 func _GeeCache_Get_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Request)
+	in := new(GetRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func _GeeCache_Get_Handler(srv interface{}, ctx context.Context, dec func(interf
 		FullMethod: GeeCache_Get_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GeeCacheServer).Get(ctx, req.(*Request))
+		return srv.(GeeCacheServer).Get(ctx, req.(*GetRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -105,5 +105,5 @@ var GeeCache_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "geecachepb.proto",
+	Metadata: "geecache.proto",
 }
