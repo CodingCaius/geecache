@@ -59,4 +59,4 @@ func NewClient(service string) *client {
 }
 
 // 测试 Client 是否实现了 PeerGetter 接口
-var _ PeerGetter = (*client)(nil)
+var _ ProtoGetter = (*client)(nil)

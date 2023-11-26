@@ -165,7 +165,7 @@ func (s *server) SetPeers(peersAddr ...string) {
 
 // Pick 根据键选择合适的节点来获取缓存数据
 // return false 代表从本地获取cache
-func (s *server) PickPeer(key string) (PeerGetter, bool) {
+func (s *server) PickPeer(key string) (ProtoGetter, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
