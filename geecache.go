@@ -148,11 +148,11 @@ func (g *Group) RegisterPeers(peers PeerPicker) {
 
 // getFromPeer 通过远程节点的 PeerGetter 接口从远程节点获取数据
 func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
-	req := &pb.Request{
+	req := &pb.GetRequest{
 		Group: g.name,
 		Key:   key,
 	}
-	res := &pb.Response{}
+	res := &pb.GetResponse{}
 	err := peer.Get(req, res)
 	if err != nil {
 		return ByteView{}, err

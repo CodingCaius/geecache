@@ -15,7 +15,7 @@ type PeerPicker interface {
 
 // PeerGetter 是每个 peer 必须实现的接口。
 type PeerGetter interface {
-	Get(in *pb.Request, out *pb.Response) error
+	Get(in *pb.GetRequest, out *pb.GetResponse) error
 }
 
 // 实现 PeerGetter 接口时，可以选择使用不同的方法签名，

@@ -61,9 +61,9 @@ func NewServer(addr string) (*server, error) {
 }
 
 // Get 实现了 geecachepb.proto 文件中 GroupCache 接口的 Get 方法，用于处理 gRPC 请求
-func (s *server) Get(ctx context.Context, in *pb.Request) (*pb.Response, error) {
+func (s *server) Get(ctx context.Context, in *pb.GetRequest) (*pb.GetResponse, error) {
 	group, key := in.GetGroup(), in.GetKey()
-	resp := &pb.Response{}
+	resp := &pb.GetResponse{}
 
 	log.Printf("[geecache_svr %s] Recv RPC Request - (%s)/(%s)", s.addr, group, key )
 	if key == "" {

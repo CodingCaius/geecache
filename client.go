@@ -18,7 +18,7 @@ type client struct {
 }
 
 // Get 从remote peer获取对应缓存值,借助 etcd 进行服务发现，通过 gRPC 进行通信，处理错误并返回结果
-func (c *client) Get(in *pb.Request, out *pb.Response) error {
+func (c *client) Get(in *pb.GetRequest, out *pb.GetResponse) error {
 	// 创建 etcd 客户端
 	cli, err := clientv3.New(defaultEtcdConfig)
 	if err != nil {
@@ -42,7 +42,7 @@ func (c *client) Get(in *pb.Request, out *pb.Response) error {
 	defer cancel()
 
 	// 发起 gRPC 请求
-	resp, err := grpcClient.Get(ctx, &pb.Request{
+	resp, err := grpcClient.Get(ctx, &pb.GetRequest{
 		Group: in.Group,
 		Key: in.Key,
 	})
