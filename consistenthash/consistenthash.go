@@ -12,7 +12,7 @@ type Hash func(data []byte) uint32
 // Map 一致性哈希算法的主数据结构
 type Map struct {
 	hash     Hash           // Hash函数
-	replicas int            // 虚拟节点倍数
+	replicas int            // 虚拟节点的倍速，每个实际节点都会对应 replicas 个虚拟节点
 	keys     []int          // Sorted // 哈希环
 	hashMap  map[int]string // 虚拟节点与真实节点的映射表 hashMap，键是虚拟节点的哈希值，值是真实节点的名称
 }

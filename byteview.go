@@ -1,5 +1,7 @@
 // 缓存值的抽象与封装
 
+// ByteView 是 groupCache 内部 value 的数据结构，结构体支持两种类型的元素，[]byte 或者 string 方式，并提供了 Copy 的方法。
+
 package geecache
 
 import (
