@@ -14,6 +14,7 @@ Sink 是一个接口类型，包含了 `SetString`, `SetBytes` `SetProto` `view`
 package geecache
 
 import (
+	"errors"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -80,11 +81,8 @@ func setSinkView(s Sink, v ByteView) error {
 	return s.SetString(v.s, v.Expire())
 }
 
-
 // 上面是接口的定义
 // 下面是接口的三种实现，分别用于处理不同类型的消息
-
-
 
 // StringSink 返回一个实现了 Sink 接口的对象
 func StringSink(sp *string) Sink {
@@ -135,9 +133,6 @@ func (s *stringSink) SetProto(m proto.Message, e time.Time) error {
 	return nil
 }
 
-
-
-
 // 返回一个 Sink 实例，用于填充 ByteView
 func ByteViewSink(dst *ByteView) Sink {
 	if dst == nil {
@@ -150,7 +145,7 @@ func ByteViewSink(dst *ByteView) Sink {
 type byteViewSink struct {
 	dst *ByteView
 	/*
-	虽然在某些情况下强调 set* 方法只能调用一次，但在实际使用中，如果有多个处理器或者程序中的多个函数需要使用同一个 Sink，并且多次调用 set* 方法并不会引起问题，那么就不必将多次调用看作是错误。
+		虽然在某些情况下强调 set* 方法只能调用一次，但在实际使用中，如果有多个处理器或者程序中的多个函数需要使用同一个 Sink，并且多次调用 set* 方法并不会引起问题，那么就不必将多次调用看作是错误。
 	*/
 }
 
@@ -185,8 +180,6 @@ func (s *byteViewSink) SetString(v string, e time.Time) error {
 	*s.dst = ByteView{s: v, e: e}
 	return nil
 }
-
-
 
 func ProtoSink(m proto.Message) Sink {
 	return &protoSink{
@@ -256,14 +249,134 @@ func (s *protoSink) SetProto(m proto.Message, e time.Time) error {
 	return nil
 
 	/*
-	直接将消息存储到 protoSink 结构体中可能会引发一些问题。proto.Message 是一个接口类型，可能包含多个不同类型的消息。结构体中的 dst 字段是一个 proto.Message 类型的值。如果直接赋值，那么它可能会指向一个完全不同类型的消息。
+		直接将消息存储到 protoSink 结构体中可能会引发一些问题。proto.Message 是一个接口类型，可能包含多个不同类型的消息。结构体中的 dst 字段是一个 proto.Message 类型的值。如果直接赋值，那么它可能会指向一个完全不同类型的消息。
 
-	通过 proto.Marshal(m) 将消息序列化为二进制形式，确保了消息的统一表示形式。
-	这样，即使消息的类型发生变化，其二进制表示形式仍然是一致的。
+		通过 proto.Marshal(m) 将消息序列化为二进制形式，确保了消息的统一表示形式。
+		这样，即使消息的类型发生变化，其二进制表示形式仍然是一致的。
 
-	通过 proto.Unmarshal(b, s.dst) 将二进制形式反序列化回 protoSink 结构体中的 dst 字段。
-	这个步骤保证了 dst 字段确切地包含了消息的实际类型和值。
+		通过 proto.Unmarshal(b, s.dst) 将二进制形式反序列化回 protoSink 结构体中的 dst 字段。
+		这个步骤保证了 dst 字段确切地包含了消息的实际类型和值。
 
 	*/
 }
 
+func AllocatingByteSliceSink(dst *[]byte) Sink {
+	return &allocBytesSink{dst: dst}
+}
+
+// 处理除字符串、字节数组和 Protocol Buffers 类型之外的其他类型数据
+// 提供了一种动态分配内存的方式，以确保每种类型的数据都有自己的内存结构，并且修改其中一种类型的数据不会影响到其他类型。
+// ，通过克隆和分配内存，它可以适应各种数据类型，并提供一种相对独立的内存管理机制
+type allocBytesSink struct {
+	dst *[]byte
+	v   ByteView
+}
+
+func (s *allocBytesSink) view() (ByteView, error) {
+	return s.v, nil
+}
+
+// setView 根据传入的 ByteView，将其中的数据复制到 *s.dst 中，并确保在这个过程中对原始数据的修改不会影响到 *s.dst。
+func (s *allocBytesSink) setView(v ByteView) error {
+	if v.b != nil {
+		// 如果 v.b 不为空，说明 ByteView 中包含字节切片数据，那么将该字节切片克隆一份，并将克隆的字节切片赋值给 *s.dst。这样确保了在外部修改 v.b 时不会影响 *s.dst。
+		*s.dst = cloneBytes(v.b)
+	} else {
+		// 如果 v.b 为空，说明 ByteView 中包含字符串数据，那么将该字符串转换为字节切片，并将转换后的字节切片赋值给 *s.dst。
+		*s.dst = []byte(v.s)
+	}
+	s.v = v
+	return nil
+}
+
+// SetProto 将 Protocol Buffers 消息序列化为字节切片，并通过调用 setBytesOwned 方法将该字节切片设置到 allocBytesSink 结构体中，进行内存管理和数据存储
+func (s *allocBytesSink) SetProto(m proto.Message, e time.Time) error {
+	b, err := proto.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return s.setBytesOwned(b, e)
+}
+
+func (s *allocBytesSink) SetBytes(b []byte, e time.Time) error {
+	return s.setBytesOwned(cloneBytes(b), e)
+}
+
+// setBytesOwned 在保护 s.v.b 视图的同时，将传入的字节切片设置到外部提供的字节切片中，并更新 ByteView 的相关字段
+func (s *allocBytesSink) setBytesOwned(b []byte, e time.Time) error {
+	if s.dst == nil {
+		return errors.New("nil AllocatingByteSliceSink *[]byte dst")
+	}
+	*s.dst = cloneBytes(b) // another copy, protecting the read-only s.v.b view
+	s.v.b = b
+	s.v.s = ""
+	s.v.e = e
+	return nil
+}
+
+func (s *allocBytesSink) SetString(v string, e time.Time) error {
+	if s.dst == nil {
+		return errors.New("nil AllocatingByteSliceSink *[]byte dst")
+	}
+	*s.dst = []byte(v)
+	s.v.b = nil
+	s.v.s = v
+	s.v.e = e
+	return nil
+}
+
+
+
+
+func TruncatingByteSliceSink(dst *[]byte) Sink {
+	return &truncBytesSink{dst: dst}
+}
+
+type truncBytesSink struct {
+	dst *[]byte
+	v   ByteView
+}
+
+func (s *truncBytesSink) view() (ByteView, error) {
+	return s.v, nil
+}
+
+func (s *truncBytesSink) SetProto(m proto.Message, e time.Time) error {
+	b, err := proto.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return s.setBytesOwned(b, e)
+}
+
+func (s *truncBytesSink) SetBytes(b []byte, e time.Time) error {
+	return s.setBytesOwned(cloneBytes(b), e)
+}
+
+func (s *truncBytesSink) setBytesOwned(b []byte, e time.Time) error {
+	if s.dst == nil {
+		return errors.New("nil TruncatingByteSliceSink *[]byte dst")
+	}
+	n := copy(*s.dst, b)
+	if n < len(*s.dst) {
+		*s.dst = (*s.dst)[:n]
+	}
+	s.v.b = b
+	s.v.s = ""
+	s.v.e = e
+	return nil
+}
+
+func (s *truncBytesSink) SetString(v string, e time.Time) error {
+	if s.dst == nil {
+		return errors.New("nil TruncatingByteSliceSink *[]byte dst")
+	}
+	n := copy(*s.dst, v)
+	if n < len(*s.dst) {
+		*s.dst = (*s.dst)[:n]
+	}
+	s.v.b = nil
+	s.v.s = v
+	s.v.e = e
+	return nil
+}
