@@ -31,6 +31,13 @@ import (
 	"sync"
 )
 
+var logger Logger
+
+
+
+
+
+
 // 一个 Group 可以认为是一个缓存的命名空间，每个 Group 拥有一个唯一的名称 name。
 // 比如可以创建三个 Group，缓存学生的成绩命名为 scores，缓存学生信息的命名为 info，缓存学生课程的命名为 courses
 // A Group is a cache namespace and associated data loaded spread over
