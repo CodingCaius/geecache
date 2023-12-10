@@ -17,6 +17,7 @@ type Logger interface {
 	Debug() Logger
 
 	//ErrorField 是带有错误值的字段,用于在日志条目中添加一个带有错误值的字段
+	// label 参数用来指定错误字段的含义或名称
 	ErrorField(label string, err error) Logger
 
 	//StringField 用于在日志条目中添加一个带有字符串值的字段。
@@ -71,4 +72,25 @@ func (l LogrusLogger) WithFields(fields map[string]interface{}) Logger {
 		Entry: l.Entry.WithFields(fields),
 		level: l.level,
 	}
+}
+
+// ErrorField - create a field for an error
+func (l LogrusLogger) ErrorField(label string, err error) Logger {
+	return LogrusLogger{
+		Entry: l.Entry.WithField(label, err),
+		level: l.level,
+	}
+}
+
+// StringField - create a field for a string.
+func (l LogrusLogger) StringField(label string, val string) Logger {
+	return LogrusLogger{
+		Entry: l.Entry.WithField(label, val),
+		level: l.level,
+	}
+}
+
+// 格式化一个消息，并将该消息记录到日志中，使用指定的日志级别
+func (l LogrusLogger) Printf(format string, args ...interface{}) {
+	l.Entry.Logf(l.level, format, args...)
 }
