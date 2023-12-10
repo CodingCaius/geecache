@@ -3,8 +3,6 @@
 // 该模块提供比cache模块更高一层抽象的能力
 // 换句话说，实现了填充缓存/命名划分缓存的能力
 
-
-
 // 包groupcache提供了带缓存的数据加载机制
 // 以及跨一组对等进程运行的重复数据删除。
 //
@@ -24,14 +22,89 @@
 package geecache
 
 import (
-	pb "github.com/CodingCaius/geecache/geecachepb"
-	"github.com/CodingCaius/geecache/singleflight"
+	"context"
 	"fmt"
 	"log"
 	"sync"
+
+	pb "github.com/CodingCaius/geecache/geecachepb"
+	"github.com/CodingCaius/geecache/singleflight"
+	"github.com/sirupsen/logrus"
 )
 
+// 一个全局的日志变量 logger，类型为 Logger。这是在整个包内使用的日志记录器。
 var logger Logger
+
+// SetLogger - 这是为了提供与 logrus 的向后兼容性而遗留的。
+func SetLogger(log *logrus.Entry) {
+	logger = LogrusLogger{Entry: log}
+}
+
+// SetLoggerFromLogger  将 logger 设置为 实现了 Logger 接口的实例
+// 允许使用不同的日志库，只要它实现了 Logger 接口，而不仅仅局限于 logrus
+func SetLoggerFromLogger(log Logger) {
+	logger = log
+}
+
+// Getter  加载键的数据
+type Getter interface {
+	// Get 返回由 key 标识的值，填充 dest。
+	// 返回的数据必须是无版本的。 也就是说，关键必须
+	// 唯一地描述加载的数据，没有隐式的当前时间，并且不依赖缓存过期机制。
+	Get(ctx context.Context, key string, dest Sink) error
+}
+
+// GetterFunc 用函数实现 Getter。
+type GetterFunc func(ctx context.Context, key string, dest Sink) error
+
+// 函数类型 GetterFunc 实现 Getter 接口
+func (f GetterFunc) Get(ctx context.Context, key string, dest Sink) error {
+	return f(ctx, key, dest)
+}
+
+// GetterFunc 通过实现 Get 方法，使得任意匿名函数func
+// 通过被GetterFunc(func)类型强制转换后，实现了 Getter 接口的能力
+// 通过这种方式，我们可以以函数的形式定义数据加载逻辑，并将其用作 Getter 接口的实现。这提供了更灵活的方式来定制数据加载过程，
+
+var (
+	mu     sync.RWMutex              // 读写互斥锁，用于保护对全局变量 groups 的并发访问
+	groups = make(map[string]*Group) // 用于存储缓存组（Group）对象。这个映射的键是缓存组的名称（字符串），值是对应的 Group 对象。
+	// 这样的设计允许在整个程序中通过名称检索已创建的缓存组。
+
+	initPeerServerOnce sync.Once // 用于确保 initPeerServer 函数只被执行一次。
+	// sync.Once 是一种在并发环境中执行初始化逻辑的常用方式，保证在多次调用中只有第一次会执行，以避免重复初始化。
+
+	initPeerServer func()
+	// 函数变量，用于存储在第一次创建缓存组时执行的初始化逻辑。
+)
+
+// 用来特定名称的 Group，这里使用了只读锁 RLock()，因为不涉及任何冲突变量的写操作
+// GetGroup 返回先前使用 NewGroup 创建的命名组，
+// 如果没有这样的组则为 nil
+// GetGroup 获取对应的 命名空间
+func GetGroup(name string) *Group {
+	mu.RLock()
+	g := groups[name]
+	mu.RUnlock()
+	return g
+}
+
+// 用于创建一个协调的、具备组意识的 Getter 对象。
+// NewGroup 用于创建一个 Group 对象，该对象实现了缓存组的协同工作。
+// newGroup 函数接受四个参数，其中第四个参数是 PeerPicker 接口的实例，用于选择对等节点。在 NewGroup 中，此参数被设为 nil，表示没有指定对等节点选择器。
+func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
+	return newGroup(name, cacheBytes, getter, nil)
+}
+
+// 从全局的缓存组池中移除指定名称的缓存组
+func DeregisterGroup(name string) {
+	mu.Lock() //获取全局的读写互斥锁
+	delete(groups, name)
+	mu.Unlock()
+}
+
+// 如果peers为nil，则通过sync.Once调用peerPicker来初始化它。
+func newGroup()
 
 
 
@@ -51,27 +124,6 @@ type Group struct {
 	loader *singleflight.Group // 处理重复请求
 }
 
-// Getter  加载键的数据
-type Getter interface {
-	Get(key string) ([]byte, error)
-}
-
-// A GetterFunc implements Getter with a function.
-type GetterFunc func(key string) ([]byte, error)
-
-// GetterFunc 通过实现 Get 方法，使得任意匿名函数func
-// 通过被GetterFunc(func)类型强制转换后，实现了 Getter 接口的能力
-
-// Get implements Getter interface function
-func (f GetterFunc) Get(key string) ([]byte, error) {
-	return f(key)
-}
-
-var (
-	mu     sync.RWMutex
-	groups = make(map[string]*Group)
-)
-
 // NewGroup 实例化 Group，创建一个新的缓存空间，并且将 group 存储在全局变量 groups 中
 func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 	// 为了确保创建的缓存组具有有效的数据获取方式，不允许传入一个空的 getter
@@ -87,17 +139,6 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 		loader:    &singleflight.Group{},
 	}
 	groups[name] = g
-	return g
-}
-
-// 用来特定名称的 Group，这里使用了只读锁 RLock()，因为不涉及任何冲突变量的写操作
-// GetGroup returns the named group previously created with NewGroup, or
-// nil if there's no such group.
-// GetGroup 获取对应命名空间的缓存
-func GetGroup(name string) *Group {
-	mu.RLock()
-	g := groups[name]
-	mu.RUnlock()
 	return g
 }
 
