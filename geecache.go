@@ -76,6 +76,7 @@ var (
 
 	initPeerServer func()
 	// 函数变量，用于存储在第一次创建缓存组时执行的初始化逻辑。
+	// 该函数在 PeerServer 启动时被调用
 )
 
 // 用来特定名称的 Group，这里使用了只读锁 RLock()，因为不涉及任何冲突变量的写操作
@@ -104,43 +105,123 @@ func DeregisterGroup(name string) {
 }
 
 // 如果peers为nil，则通过sync.Once调用peerPicker来初始化它。
-func newGroup()
-
-
-
-
-
-
-// 一个 Group 可以认为是一个缓存的命名空间，每个 Group 拥有一个唯一的名称 name。
-// 比如可以创建三个 Group，缓存学生的成绩命名为 scores，缓存学生信息的命名为 info，缓存学生课程的命名为 courses
-// A Group is a cache namespace and associated data loaded spread over
-type Group struct {
-	name      string
-	getter    Getter // 缓存未命中时获取源数据的回调(callback)
-	mainCache cache  // 并发缓存
-	peers     PeerPicker
-	// use singleflight.Group to make sure that
-	// each key is only fetched once
-	loader *singleflight.Group // 处理重复请求
-}
-
-// NewGroup 实例化 Group，创建一个新的缓存空间，并且将 group 存储在全局变量 groups 中
-func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
+func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *Group {
 	// 为了确保创建的缓存组具有有效的数据获取方式，不允许传入一个空的 getter
 	if getter == nil {
 		panic("nil Getter")
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	// 用 sync.Once 来确保初始化对等体服务器的操作（callInitPeerServer）只执行一次。
+	initPeerServerOnce.Do(callInitPeerServer)
+	// 检查是否已经注册了具有相同名称的组，如果是，则触发 panic，表示不允许重复注册相同名称的组。
+	if _, dup := groups[name]; dup {
+		panic("duplicate registration of group " + name)
+	}
 	g := &Group{
-		name:      name,
-		getter:    getter,
-		mainCache: cache{cacheBytes: cacheBytes},
-		loader:    &singleflight.Group{},
+		name:        name,
+		getter:      getter,
+		peers:       peers,
+		cacheBytes:  cacheBytes,
+		loadGroup:   &singleflight.Group{},
+		setGroup:    &singleflight.Group{},
+		removeGroup: &singleflight.Group{},
+	}
+	// 如果存在注册的新组钩子函数（newGroupHook），则调用该函数，并将新创建的组作为参数传递给它。这允许在创建组时执行额外的自定义逻辑。
+	if fn := newGroupHook; fn != nil {
+		fn(g)
 	}
 	groups[name] = g
 	return g
 }
+
+// newGroupHook，钩子函数，如果非零，则在创建新组后立即调用。
+// 每次创建新组时运行
+var newGroupHook func(*Group)
+
+// RegisterNewGroupHook 注册一个每次创建组时运行的钩子。
+func RegisterNewGroupHook(fn func(*Group)) {
+	if newGroupHook != nil {
+		panic("RegisterNewGroupHook called more than once")
+	}
+	newGroupHook = fn
+}
+
+// RegisterServerStart 注册一个在创建第一个组时运行的钩子。
+func RegisterServerStart(fn func()) {
+	if initPeerServer != nil {
+		panic("RegisterServerStart called more than once")
+	}
+	initPeerServer = fn
+}
+// 调用 initPeerServer 函数，该函数在 PeerServer 启动时被调用。
+func callInitPeerServer() {
+	// 避免在空指针的情况下调用该函数而导致程序崩溃
+	if initPeerServer != nil {
+		initPeerServer()
+	}
+}
+
+
+
+// 一个 Group 可以认为是一个缓存的命名空间，每个 Group 拥有一个唯一的名称 name。
+// 比如可以创建三个 Group，缓存学生的成绩命名为 scores，缓存学生信息的命名为 info，缓存学生课程的命名为 courses
+// A Group 是一个缓存命名空间，加载的相关数据分布在一组或多台机器上。
+type Group struct {
+	// 缓存组的名称，用于标识不同的缓存命名空间
+	name      string
+
+	// 实现了 Getter 接口的加载器，用于根据键加载数据。
+	getter    Getter // 缓存未命中时获取源数据的回调(callback)
+
+	// 确保对等体初始化的同步对象，保证初始化操作只执行一次
+	peersOnce sync.Once
+
+	// 实现了 PeerPicker 接口的对等体选择器，用于选择负责特定键的对等体。
+	peers     PeerPicker
+
+	// 限制 mainCache 和 hotCache 大小总和
+	cacheBytes int64
+
+
+
+	// 包含对于当前进程及其对等体而言是有权威的键的缓存。这个缓存包含一致性哈希到当前进程的对等体号码的键。
+	// 对于当前进程来说，权威数据是通过 Getter 接口加载的，然后存储在 mainCache 中
+	mainCache cache  // 并发缓存
+
+	// hotCache 包含该对等点不具有权威性的键/值（否则它们将位于 mainCache 中），但足够流行以保证在此过程中进行镜像，以避免通过网络从对等点获取。 拥有 hotCache 可以避免网络热点，在这种情况下，对等方的网卡可能会成为流行键的瓶颈。
+	// 谨慎使用此缓存，以最大化可全局存储的键/值对的总数。
+	hotCache   cache
+
+
+	// loadGroup 确保每个键仅获取一次（本地或远程），无论并发调用者数量如何。
+	loader flightGroup // 处理重复请求
+
+	// setGroup 确保每个添加的 key 只远程添加一次，无论并发调用者数量有多少。
+	setGroup flightGroup
+
+	//removeGroup 确保每个被删除的键只被远程删除一次，无论并发调用者的数量有多少。
+	removeGroup flightGroup
+
+	// 一个匿名的、占位的 int32 类型字段，没有实际的用途，只是为了填充字节，使得 Stats 结构体在 32 位平台上的整体大小达到 8 的倍数。
+	_ int32
+
+
+	// 包含了对该缓存组的统计信息，如获取次数、缓存命中次数、对等体加载次数等。
+	Stats Stats
+}
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Get value for a key from cache
 func (g *Group) Get(key string) (ByteView, error) {
