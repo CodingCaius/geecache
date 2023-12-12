@@ -23,6 +23,7 @@ package geecache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -154,6 +155,7 @@ func RegisterServerStart(fn func()) {
 	}
 	initPeerServer = fn
 }
+
 // 调用 initPeerServer 函数，该函数在 PeerServer 启动时被调用。
 func callInitPeerServer() {
 	// 避免在空指针的情况下调用该函数而导致程序崩溃
@@ -162,37 +164,32 @@ func callInitPeerServer() {
 	}
 }
 
-
-
 // 一个 Group 可以认为是一个缓存的命名空间，每个 Group 拥有一个唯一的名称 name。
 // 比如可以创建三个 Group，缓存学生的成绩命名为 scores，缓存学生信息的命名为 info，缓存学生课程的命名为 courses
 // A Group 是一个缓存命名空间，加载的相关数据分布在一组或多台机器上。
 type Group struct {
 	// 缓存组的名称，用于标识不同的缓存命名空间
-	name      string
+	name string
 
 	// 实现了 Getter 接口的加载器，用于根据键加载数据。
-	getter    Getter // 缓存未命中时获取源数据的回调(callback)
+	getter Getter // 缓存未命中时获取源数据的回调(callback)
 
 	// 确保对等体初始化的同步对象，保证初始化操作只执行一次
 	peersOnce sync.Once
 
 	// 实现了 PeerPicker 接口的对等体选择器，用于选择负责特定键的对等体。
-	peers     PeerPicker
+	peers PeerPicker
 
 	// 限制 mainCache 和 hotCache 大小总和
 	cacheBytes int64
 
-
-
 	// 包含对于当前进程及其对等体而言是有权威的键的缓存。这个缓存包含一致性哈希到当前进程的对等体号码的键。
 	// 对于当前进程来说，权威数据是通过 Getter 接口加载的，然后存储在 mainCache 中
-	mainCache cache  // 并发缓存
+	mainCache cache // 并发缓存
 
 	// hotCache 包含该对等点不具有权威性的键/值（否则它们将位于 mainCache 中），但足够流行以保证在此过程中进行镜像，以避免通过网络从对等点获取。 拥有 hotCache 可以避免网络热点，在这种情况下，对等方的网卡可能会成为流行键的瓶颈。
 	// 谨慎使用此缓存，以最大化可全局存储的键/值对的总数。
-	hotCache   cache
-
+	hotCache cache
 
 	// loadGroup 确保每个键仅获取一次（本地或远程），无论并发调用者数量如何。
 	loader flightGroup // 处理重复请求
@@ -206,39 +203,135 @@ type Group struct {
 	// 一个匿名的、占位的 int32 类型字段，没有实际的用途，只是为了填充字节，使得 Stats 结构体在 32 位平台上的整体大小达到 8 的倍数。
 	_ int32
 
-
 	// 包含了对该缓存组的统计信息，如获取次数、缓存命中次数、对等体加载次数等。
 	Stats Stats
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-// Get value for a key from cache
-func (g *Group) Get(key string) (ByteView, error) {
-	if key == "" {
-		return ByteView{}, fmt.Errorf("key is required")
-	}
-
-	// 从 mainCache 中查找缓存，如果存在则返回缓存值
-	if v, ok := g.mainCache.get(key); ok {
-		log.Println("[GeeCache] hit")
-		return v, nil
-	}
-
-	// 缓存不存在，则调用 load 方法，
-	// load 调用 getLocally（分布式场景下会调用 getFromPeer 从其他节点获取），getLocally 调用用户回调函数 g.getter.Get() 获取源数据，并且将源数据添加到缓存 mainCache 中（通过 populateCache 方法）
-	return g.load(key)
+// FlightGroup 被定义为 flightgroup.Group 满足的接口。 
+type flightGroup interface {
+	Do(key string, f func() (any, error)) (any, error)
+	Lock(fn func())
 }
+
+// 用于记录 groupcache 缓存组的统计信息的结构体
+type Stats struct {
+	// 记录任何 Get 请求的总数，包括来自对等节点的请求
+	Gets AtomicInt
+
+	// 记录缓存命中的总数，表示在本地缓存中找到了请求的数据
+	CacheHits AtomicInt
+
+	// 记录从对等节点请求数据的最慢持续时间。这表示在从对等节点获取数据时所花费的最长时间。
+	GetFromPeersLatencyLower AtomicInt
+
+	// 记录远程加载或远程缓存命中的总数，表示从对等节点获取数据的次数，不包括错误的情况。
+	PeersLoads AtomicInt
+
+	// 记录从对等节点获取数据时发生的错误的总数。
+	PeerErrors AtomicInt
+
+	// 记录总的加载次数，计算方式为 Gets - CacheHits，表示所有加载数据的次数，包括本地加载和远程加载。
+	Loads AtomicInt
+
+	// 记录经过 singleflight 机制去重后的加载次数，表示实际执行加载操作的次数，避免了相同数据的并发加载。
+	LoadsDeduped AtomicInt
+
+	// 记录本地成功加载数据的总次数，表示从本地缓存获取数据的次数。
+	LocalLoads AtomicInt
+
+	// 记录本地加载数据时发生错误的总次数，表示从本地缓存获取数据失败的次数。
+	LocalLoadErrs AtomicInt
+
+	// 记录的是该节点向其他节点发起的网络请求的总数
+	ServerRequests AtomicInt
+}
+
+// AtomicInt 是一个可以原子访问的 int64。
+type AtomicInt int64
+
+// Name returns the name of the group.
+func (g *Group) Name() string {
+	return g.name
+}
+
+// 初始化缓存组的节点选择器，初始化用于选择对等节点的机制
+func (g *Group) initPeers() {
+	if g.peers == nil {
+		g.peers = getPeers(g.name)
+	}
+}
+
+// Get 方法用于从缓存中获取数据
+// 如果缓存命中，直接返回缓存中的数据
+// 如果缓存未命中，根据情况从对等节点或本地加载数据，并将加载到的数据设置到目标 Sink 中。
+// 在整个过程中，对缓存命中和未命中的情况进行了统计。
+func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
+	g.peersOnce.Do(g.initPeers)
+	g.Stats.Gets.Add(1)
+	if dest == nil {
+		return errors.New("groupcache: nil dest Sink")
+	}
+	// 从缓存中查找数据
+	value, cacheHit := g.lookupCache(key)
+
+	if cacheHit {
+		g.Stats.CacheHits.Add(1)
+		// 将缓存中的数据设置到目标 Sink 中
+		return setSinkView(dest, value)
+	}
+
+	// 处理缓存未命中的情况
+
+	// 初始化一个标志，表示目标 Sink 是否已经被填充
+	destPopulated := false
+	// 从对等节点或本地加载数据，填充目标 Sink
+	value, destPopulated, err := g.load(ctx, key, dest)
+	if err != nil {
+		return err
+	}
+	// 如果目标 Sink 已经被填充 (destPopulated)，则返回 nil，表示操作成功。
+	if destPopulated {
+		return nil
+	}
+	// 否则，调用 setSinkView(dest, value) 将加载到的数据设置到目标 Sink 中，并返回 nil，表示操作成功。
+	return setSinkView(dest, value)
+}
+
+// Set 设置键值对到缓存中
+func (g *Group) Set(ctx context.Context, key string, value []byte, expire time.Time, hotCache bool) error {
+	// 初始化用于选择对等节点的机制
+	g.peersOnce.Do(g.initPeers)
+
+	if key == "" {
+		return errors.New("empty Set() key not allowed")
+	}
+
+
+}
+
+
+
+
+
+
+
+
+// // Get value for a key from cache
+// func (g *Group) Get(key string) (ByteView, error) {
+// 	if key == "" {
+// 		return ByteView{}, fmt.Errorf("key is required")
+// 	}
+
+// 	// 从 mainCache 中查找缓存，如果存在则返回缓存值
+// 	if v, ok := g.mainCache.get(key); ok {
+// 		log.Println("[GeeCache] hit")
+// 		return v, nil
+// 	}
+
+// 	// 缓存不存在，则调用 load 方法，
+// 	// load 调用 getLocally（分布式场景下会调用 getFromPeer 从其他节点获取），getLocally 调用用户回调函数 g.getter.Get() 获取源数据，并且将源数据添加到缓存 mainCache 中（通过 populateCache 方法）
+// 	return g.load(key)
+// }
 
 // load 从缓存中加载数据，首先尝试从远程节点获取，如果失败则从本地缓存获取
 func (g *Group) load(key string) (value ByteView, err error) {
