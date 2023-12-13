@@ -207,7 +207,8 @@ type Group struct {
 	Stats Stats
 }
 
-// FlightGroup 被定义为 flightgroup.Group 满足的接口。 
+// FlightGroup 被定义为 flightgroup.Group 满足的接口。
+// 即 singleflight的结构体满足的接口
 type flightGroup interface {
 	Do(key string, f func() (any, error)) (any, error)
 	Lock(fn func())
@@ -306,7 +307,104 @@ func (g *Group) Set(ctx context.Context, key string, value []byte, expire time.T
 		return errors.New("empty Set() key not allowed")
 	}
 
+	// 使用 g.setGroup.Do 方法确保对于相同的 key，只有一个请求在执行
+	_, err := g.setGroup.Do(key, func() (interface{}, error) {
+		// 如果远程对等体拥有该 key
+		owner, ok := g.peers.PickPeer(key)
+		if ok {
+			// 通过远程对等体设置 key 的值
+			if err := g.setFromPeer(ctx, owner, key, value, expire); err != nil {
+                return nil, err
+            }
+			// 如果需要，将值更新到本地缓存中
+            if hotCache {
+                g.localSet(key, value, expire, &g.hotCache)
+            }
+            return nil, nil
+		}
 
+		// 如果当前节点拥有该 key，则将值设置到本地缓存中
+        g.localSet(key, value, expire, &g.mainCache)
+        return nil, nil
+	})
+	// 返回可能出现的错误
+    return err
+}
+
+// Remove 会从缓存中清除密钥，然后将删除请求转发给所有对等点。
+func (g *Group) Remove(ctx context.Context, key string) error {
+	g.peersOnce.Do(g.initPeers)
+
+	_, err := g.removeGroup.Do(key, func() (interface{}, error) {
+		// 首先从 key 所属的对等体移除
+        owner, ok := g.peers.PickPeer(key)
+		if ok {
+			if err := g.removeFromPeer(ctx, owner, key); err != nil {
+				return nil, err
+			}
+		}
+		// 然后从本地缓存中移除
+        g.localRemove(key)
+
+		// 异步地清除 key 在所有对等体的主缓存和热缓存中的值
+        wg := sync.WaitGroup{}
+        errs := make(chan error)
+
+		for _, peer := range g.peers.GetAll() {
+            // 避免重复从 key 所属的对等体删除
+            if peer == owner {
+                continue
+            }
+
+            wg.Add(1)
+            go func(peer ProtoGetter) {
+                errs <- g.removeFromPeer(ctx, peer, key)
+                wg.Done()
+            }(peer)
+        }
+
+		go func() {
+            wg.Wait()
+            close(errs)
+        }()
+
+		// TODO(thrawn01): 是否应该报告所有错误？每个对等体的上下文取消错误报告不太有意义。
+        var err error
+        for e := range errs {
+            err = e
+        }
+
+        return nil, err
+	})
+	return err
+}
+
+
+// load 通过本地调用 getter 或将其发送到另一台机器来加载密钥。
+func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
+	// 增加统计信息，表示有一个加载操作。
+	g.Stats.Loads.Add(1)
+
+	// 保证每个键只被获取一次
+	viewi, err := g.loadGroup.Do(key, func() (interface{}, error) {
+		// 再次检查缓存，因为 singleflight 只能删除同时重叠的调用。 2 个并发请求可能会错过缓存，从而导致 2 个 load() 调用。 不幸的 goroutine 调度会导致该回调连续运行两次。 如果我们不再检查缓存，即使该键只有一个条目，cache.nbytes 也会增加到以下。
+		// 考虑两个 goroutine 的以下序列化事件排序，其中针对相同的键调用此回调两次：
+		// 1: 获取(“密钥”)
+		// 2: 获取(“密钥”)
+		// 1:lookupCache("key")
+		// 2:lookupCache("key")
+		// 1：加载（“键”）
+		// 2：加载（“键”）
+		// 1: loadGroup.Do("key", fn)
+		// 1: fn()
+		// 2: loadGroup.Do("key", fn)
+		// 2: fn()
+	})
+
+	if err != nil {
+		value = viewi.(ByteView)
+	}
+	return
 }
 
 

@@ -64,3 +64,13 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 // Done()：减少等待组的计数，表示一个 goroutine 已经完成了其任务。
 
 // Wait()：阻塞直到等待组的计数变为零。即等待所有的 Done 调用达到 Add 调用的数量。
+
+
+
+
+
+func (g *Group) Lock(fn func()) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	fn()
+}
