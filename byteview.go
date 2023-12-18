@@ -2,6 +2,8 @@
 
 // ByteView 是 groupCache 内部 value 的数据结构，结构体支持两种类型的元素，[]byte 或者 string 方式，并提供了 Copy 的方法。
 
+// ByteView 是 groupcache 包中定义的只读字节视图结构。这样设计是为了确保在用户获取数据时，不会直接修改缓存中的数据。
+
 package geecache
 
 import (

@@ -68,7 +68,7 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 
 
 
-
+// //通过对 loadGroup 的加锁，确保在设置缓存时没有其他请求在飞行，以避免并发冲突。这种机制可以确保对缓存的并发访问是安全的。
 func (g *Group) Lock(fn func()) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

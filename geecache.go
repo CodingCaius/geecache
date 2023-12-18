@@ -24,9 +24,9 @@ package geecache
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	pb "github.com/CodingCaius/geecache/geecachepb"
 	"github.com/CodingCaius/geecache/singleflight"
@@ -192,7 +192,7 @@ type Group struct {
 	hotCache cache
 
 	// loadGroup 确保每个键仅获取一次（本地或远程），无论并发调用者数量如何。
-	loader flightGroup // 处理重复请求
+	loadGroup flightGroup // 处理重复请求
 
 	// setGroup 确保每个添加的 key 只远程添加一次，无论并发调用者数量有多少。
 	setGroup flightGroup
@@ -226,7 +226,7 @@ type Stats struct {
 	GetFromPeersLatencyLower AtomicInt
 
 	// 记录远程加载或远程缓存命中的总数，表示从对等节点获取数据的次数，不包括错误的情况。
-	PeersLoads AtomicInt
+	PeerLoads AtomicInt
 
 	// 记录从对等节点获取数据时发生的错误的总数。
 	PeerErrors AtomicInt
@@ -314,21 +314,21 @@ func (g *Group) Set(ctx context.Context, key string, value []byte, expire time.T
 		if ok {
 			// 通过远程对等体设置 key 的值
 			if err := g.setFromPeer(ctx, owner, key, value, expire); err != nil {
-                return nil, err
-            }
+				return nil, err
+			}
 			// 如果需要，将值更新到本地缓存中
-            if hotCache {
-                g.localSet(key, value, expire, &g.hotCache)
-            }
-            return nil, nil
+			if hotCache {
+				g.localSet(key, value, expire, &g.hotCache)
+			}
+			return nil, nil
 		}
 
 		// 如果当前节点拥有该 key，则将值设置到本地缓存中
-        g.localSet(key, value, expire, &g.mainCache)
-        return nil, nil
+		g.localSet(key, value, expire, &g.mainCache)
+		return nil, nil
 	})
 	// 返回可能出现的错误
-    return err
+	return err
 }
 
 // Remove 会从缓存中清除密钥，然后将删除请求转发给所有对等点。
@@ -337,50 +337,49 @@ func (g *Group) Remove(ctx context.Context, key string) error {
 
 	_, err := g.removeGroup.Do(key, func() (interface{}, error) {
 		// 首先从 key 所属的对等体移除
-        owner, ok := g.peers.PickPeer(key)
+		owner, ok := g.peers.PickPeer(key)
 		if ok {
 			if err := g.removeFromPeer(ctx, owner, key); err != nil {
 				return nil, err
 			}
 		}
 		// 然后从本地缓存中移除
-        g.localRemove(key)
+		g.localRemove(key)
 
 		// 异步地清除 key 在所有对等体的主缓存和热缓存中的值
-        wg := sync.WaitGroup{}
-        errs := make(chan error)
+		wg := sync.WaitGroup{}
+		errs := make(chan error)
 
 		for _, peer := range g.peers.GetAll() {
-            // 避免重复从 key 所属的对等体删除
-            if peer == owner {
-                continue
-            }
+			// 避免重复从 key 所属的对等体删除
+			if peer == owner {
+				continue
+			}
 
-            wg.Add(1)
-            go func(peer ProtoGetter) {
-                errs <- g.removeFromPeer(ctx, peer, key)
-                wg.Done()
-            }(peer)
-        }
+			wg.Add(1)
+			go func(peer ProtoGetter) {
+				errs <- g.removeFromPeer(ctx, peer, key)
+				wg.Done()
+			}(peer)
+		}
 
 		go func() {
-            wg.Wait()
-            close(errs)
-        }()
+			wg.Wait()
+			close(errs)
+		}()
 
 		// TODO(thrawn01): 是否应该报告所有错误？每个对等体的上下文取消错误报告不太有意义。
-        var err error
-        for e := range errs {
-            err = e
-        }
+		var err error
+		for e := range errs {
+			err = e
+		}
 
-        return nil, err
+		return nil, err
 	})
 	return err
 }
 
-
-// load 通过本地调用 getter 或将其发送到另一台机器来加载密钥。
+// load 通过本地调用 getter 或将其发送到另一台机器来加载指定键的数据。
 func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
 	// 增加统计信息，表示有一个加载操作。
 	g.Stats.Loads.Add(1)
@@ -399,6 +398,83 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 		// 1: fn()
 		// 2: loadGroup.Do("key", fn)
 		// 2: fn()
+
+		// 首先再次检查缓存（g.lookupCache(key)）。如果缓存命中，直接返回缓存中的值，不进行后续的加载操作。
+		if value, cacheHit := g.lookupCache(key); cacheHit {
+			g.Stats.CacheHits.Add(1)
+			return value, nil
+		}
+		// 如果缓存未命中，记录缓存未命中的统计信息，并尝试从远程对等体获取数据
+		g.Stats.LoadsDeduped.Add(1)
+		var value ByteView
+		var err error
+		if peer, ok := g.peers.PickPeer(key); ok {
+			// 为了测量从远程对等体获取数据所花费的时间
+			start := time.Now()
+
+			// get value from peers
+			value, err = g.getFromPeer(ctx, peer, key)
+
+			// 时间计算，单位转换为毫秒
+			duration := int64(time.Since(start)) / int64(time.Millisecond)
+
+			// 这段代码的目的是记录从远程对等体获取数据的耗时，以便在统计信息中记录最慢的请求的持续时间。
+			// 在后续的代码中，将这个持续时间与先前记录的最慢持续时间进行比较，并更新统计信息，以便了解系统性能。
+
+			// 比较当前获取数据的持续时间（duration）与之前记录的最慢持续时间
+			if g.Stats.GetFromPeersLatencyLower.Get() < duration {
+				g.Stats.GetFromPeersLatencyLower.Store(duration)
+			}
+
+			if err == nil {
+				g.Stats.PeerLoads.Add(1)
+				return value, nil
+			}
+
+			// 如果错误是context.Canceled，说明上下文已取消，直接返回错误。
+			if errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+
+			// 如果错误是&ErrNotFound{}，说明对等体上不存在该数据，也直接返回错误
+			if errors.Is(err, &ErrNotFound{}) {
+				return nil, err
+			}
+
+			// 如果错误是&ErrRemoteCall{}，说明远程调用出错，同样直接返回错误。
+			if errors.Is(err, &ErrRemoteCall{}) {
+				return nil, err
+			}
+
+			// 如果存在日志记录器（logger != nil），记录错误信息和相关的键（key），然后增加远程加载错误的统计信息（g.Stats.PeerErrors.Add(1)）。
+			if logger != nil {
+				logger.Error().
+					WithFields(map[string]interface{}{
+						"err":      err,
+						"key":      key,
+						"category": "groupcache",
+					}).Printf("error retrieving key from peer '%s'", peer.GetURL())
+			}
+
+			g.Stats.PeerErrors.Add(1)
+			// 如果上下文不为nil且上下文的错误不为nil，则说明上下文已不再有效，直接返回错误。
+			if ctx != nil && ctx.Err() != nil {
+				// Return here without attempting to get locally
+				// since the context is no longer valid
+				return nil, err
+			}
+		}
+
+		value, err = g.getLocally(ctx, key, dest)
+		if err != nil {
+			g.Stats.LocalLoadErrs.Add(1)
+			return nil, err
+		}
+		g.Stats.LocalLoads.Add(1)
+		destPopulated = true // only one caller of load gets this return value
+		// 将获取到的数据写入主缓存（g.mainCache）
+		g.populateCache(key, value, &g.mainCache)
+		return value, nil
 	})
 
 	if err != nil {
@@ -407,73 +483,168 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 	return
 }
 
-
-
-
-
-
-
-
-// // Get value for a key from cache
-// func (g *Group) Get(key string) (ByteView, error) {
-// 	if key == "" {
-// 		return ByteView{}, fmt.Errorf("key is required")
-// 	}
-
-// 	// 从 mainCache 中查找缓存，如果存在则返回缓存值
-// 	if v, ok := g.mainCache.get(key); ok {
-// 		log.Println("[GeeCache] hit")
-// 		return v, nil
-// 	}
-
-// 	// 缓存不存在，则调用 load 方法，
-// 	// load 调用 getLocally（分布式场景下会调用 getFromPeer 从其他节点获取），getLocally 调用用户回调函数 g.getter.Get() 获取源数据，并且将源数据添加到缓存 mainCache 中（通过 populateCache 方法）
-// 	return g.load(key)
-// }
-
-// load 从缓存中加载数据，首先尝试从远程节点获取，如果失败则从本地缓存获取
-func (g *Group) load(key string) (value ByteView, err error) {
-	// 每个密钥仅获取一次（本地或远程）
-	//无论并发呼叫者的数量如何。
-	viewi, err := g.loader.Do(key, func() (interface{}, error) {
-		if g.peers != nil {
-			if peer, ok := g.peers.PickPeer(key); ok {
-				if value, err = g.getFromPeer(peer, key); err == nil {
-					return value, nil
-				}
-				log.Println("[GeeCache] Failed to get from peer", err)
-			}
-		}
-
-		return g.getLocally(key)
-	})
-
-	if err == nil {
-		return viewi.(ByteView), nil
-	}
-	return
-}
-
 // 缓存未命中时，调用回调函数获取数据，并填充缓存
-func (g *Group) getLocally(key string) (ByteView, error) {
-	bytes, err := g.getter.Get(key)
+func (g *Group) getLocally(ctx context.Context, key string, dest Sink) (ByteView, error) {
+	err := g.getter.Get(ctx, key, dest)
 	// 如果获取数据时发生错误，会返回一个空的 ByteView 和相应的错误
 	if err != nil {
 		return ByteView{}, err
-
 	}
+	return dest.view()
+
 	// 如果数据成功获取，它将获取到的字节数组 bytes 使用 cloneBytes 函数进行克隆，然后创建一个 ByteView 结构体，并将克隆后的字节数组赋值给 ByteView 的 b 字段
 	// 这一步之所以要复制字节数组而不是直接传递 bytes，是为了确保数据的不可变性和安全性
 	// ，切片（包括字节数组切片）是引用类型，这意味着如果直接传递 bytes，那么后续对 bytes 的任何修改都会影响到原始数据。这可能会导致在缓存中共享的数据被不经意地修改，从而引发不一致的结果或数据损坏
-	value := ByteView{b: cloneBytes(bytes)}
-	g.populateCache(key, value)
+	// value := ByteView{b: cloneBytes(bytes)}
+	// g.populateCache(key, value)
+	// return value, nil
+}
+
+// getFromPeer 从远程节点获取数据
+func (g *Group) getFromPeer(ctx context.Context, peer ProtoGetter, key string) (ByteView, error) {
+	req := &pb.GetRequest{
+		Group: g.name,
+		Key:   key,
+	}
+	res := &pb.GetResponse{}
+	// 使用远程节点的 ProtoGetter 接口调用 peer.Get 方法，将请求结构体 req 发送给远程节点
+	err := peer.Get(ctx, req, res)
+	if err != nil {
+		return ByteView{}, err
+	}
+	// 解析获取的响应：从 pb.GetResponse 结构体中解析获取的响应。如果成功获取响应，将其解析为 ByteView 结构体，其中包含从远程节点获取的数据。
+	var expire time.Time
+	if res.Expire != nil && *res.Expire != 0 {
+		expire = time.Unix(*res.Expire/int64(time.Second), *res.Expire%int64(time.Second))
+		if time.Now().After(expire) {
+			return ByteView{}, errors.New("peer returned expired value")
+		}
+	}
+
+	value := ByteView{b: res.Value, e: expire}
+
+	// Always populate the hot cache
+	// 将获取的数据加入本地热缓存，以防止频繁从远程节点获取
+	g.populateCache(key, value, &g.hotCache)
 	return value, nil
 }
 
-// populateCache 将 key 和对应的 ByteView 存储到缓存中,提供填充缓存的能力
-func (g *Group) populateCache(key string, value ByteView) {
-	g.mainCache.add(key, value)
+// setFromPeer 用于向远程节点设置数据
+func (g *Group) setFromPeer(ctx context.Context, peer ProtoGetter, k string, v []byte, e time.Time) error {
+	// 如果指定了过期时间 e，将其转换为纳秒并存储在 expire 变量中。
+	var expire int64
+	if !e.IsZero() {
+		expire = e.UnixNano()
+	}
+	req := &pb.SetRequest{
+		Expire: expire,
+		Group:  g.name,
+		Key:    k,
+		Value:  v,
+	}
+	return peer.Set(ctx, req)
 }
+
+// removeFromPeer 向远程节点发起删除数据的请求
+func (g *Group) removeFromPeer(ctx context.Context, peer ProtoGetter, key string) error {
+	req := &pb.GetRequest{
+		Group: g.name,
+		Key:   key,
+	}
+	return peer.Remove(ctx, req)
+}
+
+// lookupCache 用于在缓存中查找指定键 key 对应的数据
+func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
+	// 检查是否设置了缓存的大小限制
+	// 如果缓存大小限制小于等于零，表示不使用缓存，直接返回零值。
+	if g.cacheBytes <= 0 {
+		return
+	}
+	value, ok = g.mainCache.get(key)
+	if ok {
+		return
+	}
+	value, ok = g.hotCache.get(key)
+	return
+
+	// 它首先检查 mainCache，
+	// 如果在主缓存中找到了数据，就返回该数据和 true，表示查找成功。
+	// 如果主缓存中没有找到，则继续在热缓存 hotCache 中查找，
+	// 如果在热缓存中找到了数据，同样返回该数据和 true。
+	// 如果在两个缓存中都没有找到数据，就返回零值 ByteView{} 和 false。
+}
+
+// localSet 在本地缓存中设置键值对，并且可以指定数据的过期时间
+func (g *Group) localSet(key string, value []byte, expire time.Time, cache *cache) {
+	if g.cacheBytes <= 0 {
+		return
+	}
+
+	bv := ByteView{
+		b: value,
+		e: expire,
+	}
+
+	// 确保没有请求正在执行,通过对 loadGroup 进行加锁来实现。
+	g.loadGroup.Lock(func() {
+		// 在加锁的环境中执行下面的操作
+		// 在加锁的环境中，调用 populateCache 方法，将键为 key、值为 bv 的数据添加到指定的缓存 cache 中
+		g.populateCache(key, bv, cache)
+	})
+
+	//通过对 loadGroup 的加锁，确保在设置缓存时没有其他请求在飞行，以避免并发冲突。这种机制可以确保对缓存的并发访问是安全的。
+}
+
+// localRemove 在本地缓存中移除指定键的数据
+func (g *Group) localRemove(key string) {
+	// Clear key from our local cache
+	if g.cacheBytes <= 0 {
+		return
+	}
+
+	// 确保没有请求正在执行
+	g.loadGroup.Lock(func() {
+		// 在加锁的环境中，分别从热缓存 hotCache 和主缓存 mainCache 中移除指定键 key 的数据。
+		g.hotCache.remove(key)
+		g.mainCache.remove(key)
+	})
+}
+
+
+
+
+// populateCache 向指定的缓存（cache）中添加键值对，并在添加后检查缓存是否超出预定的大小，如果超出，则进行适当的淘汰策略
+func (g *Group) populateCache(key string, value ByteView, cache *cache) {
+	// 首先，检查是否设置了缓存的大小限制（g.cacheBytes <= 0）。如果缓存大小限制小于等于零，表示不使用缓存，直接返回
+	if g.cacheBytes <= 0 {
+		return
+	}
+	// 向指定的缓存（cache）中添加键值对
+	cache.add(key, value)
+
+	// Evict items from cache(s) if necessary.
+	for {
+		mainBytes := g.mainCache.bytes()
+		hotBytes := g.hotCache.bytes()
+		if mainBytes+hotBytes <= g.cacheBytes {
+			return
+		}
+
+		// TODO(bradfitz): this is good-enough-for-now logic.
+		// It should be something based on measurements and/or
+		// respecting the costs of different resources.
+		victim := &g.mainCache
+		// 当前实现中，优先选择要淘汰的缓存是 mainCache 还是 hotCache，取决于它们的字节数比例
+		if hotBytes > mainBytes/8 {
+			victim = &g.hotCache
+		}
+		// 从选择的缓存中移除最老的键值对，以释放空间
+		victim.removeOldest()
+	}
+}
+
+
 
 // RegisterPeers 为 Group 注册远程节点选择器(Server)
 func (g *Group) RegisterPeers(peers PeerPicker) {
@@ -482,20 +653,6 @@ func (g *Group) RegisterPeers(peers PeerPicker) {
 		panic("RegisterPeerPicker called more than once")
 	}
 	g.peers = peers
-}
-
-// getFromPeer 通过远程节点的 PeerGetter 接口从远程节点获取数据
-func (g *Group) getFromPeer(peer ProtoGetter, key string) (ByteView, error) {
-	req := &pb.GetRequest{
-		Group: g.name,
-		Key:   key,
-	}
-	res := &pb.GetResponse{}
-	err := peer.Get(req, res)
-	if err != nil {
-		return ByteView{}, err
-	}
-	return ByteView{b: res.Value}, nil
 }
 
 // DestoryGroup 销毁指定组名的缓存组，停止相关服务器

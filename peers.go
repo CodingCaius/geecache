@@ -28,7 +28,7 @@ type ProtoGetter interface {
 	// 从 peer 删除缓存项
 	Remove(context context.Context, in *pb.GetRequest) error
 	// 将缓存项设置到 peer 上
-	Set(context context.Context, in pb.SetRequest) error
+	Set(context context.Context, in *pb.SetRequest) error
 	// GetURL 获取 peer 的 URL
 	GetURL() string
 }
