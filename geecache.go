@@ -24,11 +24,13 @@ package geecache
 import (
 	"context"
 	"errors"
-	"log"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/CodingCaius/geecache/geecachepb"
+	"github.com/CodingCaius/geecache/lru"
 	"github.com/CodingCaius/geecache/singleflight"
 	"github.com/sirupsen/logrus"
 )
@@ -246,9 +248,6 @@ type Stats struct {
 	// 记录的是该节点向其他节点发起的网络请求的总数
 	ServerRequests AtomicInt
 }
-
-// AtomicInt 是一个可以原子访问的 int64。
-type AtomicInt int64
 
 // Name returns the name of the group.
 func (g *Group) Name() string {
@@ -514,8 +513,8 @@ func (g *Group) getFromPeer(ctx context.Context, peer ProtoGetter, key string) (
 	}
 	// 解析获取的响应：从 pb.GetResponse 结构体中解析获取的响应。如果成功获取响应，将其解析为 ByteView 结构体，其中包含从远程节点获取的数据。
 	var expire time.Time
-	if res.Expire != nil && *res.Expire != 0 {
-		expire = time.Unix(*res.Expire/int64(time.Second), *res.Expire%int64(time.Second))
+	if res.Expire != 0 {
+		expire = time.Unix(res.Expire/int64(time.Second), res.Expire%int64(time.Second))
 		if time.Now().After(expire) {
 			return ByteView{}, errors.New("peer returned expired value")
 		}
@@ -611,9 +610,6 @@ func (g *Group) localRemove(key string) {
 	})
 }
 
-
-
-
 // populateCache 向指定的缓存（cache）中添加键值对，并在添加后检查缓存是否超出预定的大小，如果超出，则进行适当的淘汰策略
 func (g *Group) populateCache(key string, value ByteView, cache *cache) {
 	// 首先，检查是否设置了缓存的大小限制（g.cacheBytes <= 0）。如果缓存大小限制小于等于零，表示不使用缓存，直接返回
@@ -644,24 +640,194 @@ func (g *Group) populateCache(key string, value ByteView, cache *cache) {
 	}
 }
 
+// CacheType 表示一种缓存类型。
+type CacheType int
 
+const (
+	// MainCache 是该对等方所拥有的项目的缓存。
+	MainCache CacheType = iota + 1 // iota 值为 1，下面的数递增
 
-// RegisterPeers 为 Group 注册远程节点选择器(Server)
-func (g *Group) RegisterPeers(peers PeerPicker) {
-	// 如果已经注册过节点选择器，会触发 panic
-	if g.peers != nil {
-		panic("RegisterPeerPicker called more than once")
+	// HotCache 是看起来足够流行以复制到此节点的项目的缓存，即使它不是所有者。
+	HotCache
+)
+
+// CacheStats 根据指定的缓存类型返回相应缓存的统计信息
+func (g *Group) CacheStats(which CacheType) CacheStats {
+	switch which {
+	case MainCache:
+		return g.mainCache.stats()
+	case HotCache:
+		return g.hotCache.stats()
+	default:
+		return CacheStats{}
 	}
-	g.peers = peers
 }
 
-// DestoryGroup 销毁指定组名的缓存组，停止相关服务器
-func DestoryGroup(name string) {
-	g := GetGroup(name)
-	if g != nil {
-		svr := g.peers.(*server)
-		svr.Stop()
-		delete(groups, name)
-		log.Printf("Destroy cache [%s %s]", name, svr.addr)
+// NowFunc 返回当前时间，LRU 使用该时间来确定该值是否已过期。 这可以通过测试来覆盖，以确保项目在过期时被驱逐。
+// NowFunc 被初始化为 time.Now，即获取当前系统时间的函数
+var NowFunc lru.NowFunc = time.Now
+
+// cache 是对 lru.Cache 的包装
+// cache 结构体添加了同步机制，确保对缓存的访问是线程安全的
+// 此外，它还规定了所有的值必须是 ByteView 类型，并记录了所有键和值的大小。
+type cache struct {
+	mu sync.RWMutex
+
+	// 记录所有键和值的大小总和
+	nbytes int64
+
+	lru *lru.Cache
+
+	// nhit int64: 记录缓存命中的次数
+	// nget int64: 记录缓存访问的总次数
+	nhit, nget int64
+
+	// 记录缓存的驱逐（eviction）次数
+	nevict int64
+
+	// cache 中包含缓存命中的统计信息是为了在缓存层面更方便地跟踪和记录这些信息
+	// 这样在maincache和hotcache层就也有了统计信息，更方便更新和操作
+}
+
+// stats 获取当前缓存的统计信息
+func (c *cache) stats() CacheStats {
+	// 以读锁的方式锁定
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return CacheStats{
+		Bytes:     c.nbytes,
+		Items:     c.itemsLocked(),
+		Gets:      c.nget,
+		Hits:      c.nhit,
+		Evictions: c.nevict,
 	}
 }
+
+// add 向缓存中添加键值对
+func (c *cache) add(key string, value ByteView) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// 检查缓存是否为空。如果为空，说明这是第一次添加数据，需要初始化缓存
+	if c.lru == nil {
+		// 创建一个新的lru.Cache实例
+		c.lru = &lru.Cache{
+			Now: NowFunc, // 获取当前时间
+			// 定义OnEvicted回调函数，该函数在缓存中的数据被逐出时执行，用于更新统计信息
+			OnEvicted: func(key lru.Key, value interface{}) {
+				val := value.(ByteView)
+				c.nbytes -= int64(len(key.(string))) + int64(val.Len())
+				c.nevict++
+			},
+		}
+	}
+	// 调用lru包中的Add方法将键值对添加到缓存中。同时，传递了过期时间（value.Expire()），用于在逐出时检查是否过期
+	c.lru.Add(key, value, value.Expire())
+	c.nbytes += int64(len(key)) + int64(value.Len())
+}
+
+// get 从缓存中获取键对应的值
+func (c *cache) get(key string) (value ByteView, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nget++
+	if c.lru == nil {
+		return
+	}
+	vi, ok := c.lru.Get(key)
+	if !ok {
+		return
+	}
+	c.nhit++
+	// 将值转换为ByteView类型并返回
+	return vi.(ByteView), true
+}
+
+// remove 从缓存中移除指定键的条目
+func (c *cache) remove(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lru == nil {
+		return
+	}
+	c.lru.Remove(key)
+}
+
+func (c *cache) removeOldest() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lru != nil {
+		c.lru.RemoveOldest()
+	}
+}
+
+// bytes 获取缓存中所有键值对占用的字节数
+func (c *cache) bytes() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.nbytes
+}
+
+// items 获取缓存中的键值对数量
+func (c *cache) items() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.itemsLocked()
+}
+
+// 获取缓存中的键值对数量
+func (c *cache) itemsLocked() int64 {
+	if c.lru == nil {
+		return 0
+	}
+	return int64(c.lru.Len())
+}
+
+// int64 类型的别名，用于在并发环境下安全地进行原子操作
+type AtomicInt int64
+
+// Add 以原子方式加法将 n 添加到 i 中
+func (i *AtomicInt) Add(n int64) {
+	atomic.AddInt64((*int64)(i), n)
+}
+
+// Store 以原子方式存储 n 到 i
+func (i *AtomicInt) Store(n int64) {
+	atomic.StoreInt64((*int64)(i), n)
+}
+
+// Get 原子化地获取 i 的值
+func (i *AtomicInt) Get() int64 {
+	return atomic.LoadInt64((*int64)(i))
+}
+
+// String 将 AtomicInt 的当前值转换为字符串
+func (i *AtomicInt) String() string {
+	return strconv.FormatInt(i.Get(), 10)
+}
+
+// CacheStats 存储缓存信息的结构体，函数返回的缓存数据由该结构体表示
+type CacheStats struct {
+	// 表示缓存中所有键值对的字节总数
+	Bytes     int64
+
+	// 表示缓存中的键值对数量
+	Items     int64
+
+	// 表示缓存的获取次数，即调用 Get 方法的次数
+	Gets      int64
+
+	// 表示缓存的命中次数，即调用 Get 方法且缓存中存在相应键的次数
+	Hits      int64
+
+	// 表示缓存的驱逐次数，即因为缓存空间不足而移除的键值对的次数
+	Evictions int64
+}
+
+// // RegisterPeers 为 Group 注册远程节点选择器(Server)
+// func (g *Group) RegisterPeers(peers PeerPicker) {
+// 	// 如果已经注册过节点选择器，会触发 panic
+// 	if g.peers != nil {
+// 		panic("RegisterPeerPicker called more than once")
+// 	}
+// 	g.peers = peers
+// }
