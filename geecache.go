@@ -822,12 +822,3 @@ type CacheStats struct {
 	// 表示缓存的驱逐次数，即因为缓存空间不足而移除的键值对的次数
 	Evictions int64
 }
-
-// // RegisterPeers 为 Group 注册远程节点选择器(Server)
-// func (g *Group) RegisterPeers(peers PeerPicker) {
-// 	// 如果已经注册过节点选择器，会触发 panic
-// 	if g.peers != nil {
-// 		panic("RegisterPeerPicker called more than once")
-// 	}
-// 	g.peers = peers
-// }
