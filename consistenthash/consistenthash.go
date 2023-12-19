@@ -30,6 +30,11 @@ func New(replicas int, fn Hash) *Map {
 	return m
 }
 
+// Returns 如果没有可用的项，则返回 true
+func (m *Map) IsEmpty() bool {
+	return len(m.keys) == 0
+}
+
 // Add 添加节点到哈希中
 // 允许传入 0 或 多个真实节点的名称
 func (m *Map) Add(keys ...string) {
